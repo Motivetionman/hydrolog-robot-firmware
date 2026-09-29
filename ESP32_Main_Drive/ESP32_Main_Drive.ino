@@ -7,7 +7,7 @@ const int PIN_L_IN1 = 25;
 const int PIN_L_IN2 = 26;
 
 const int PIN_R_IN1 = 14;
-const int PIN_R_IN2 = 12;
+const int PIN_R_IN2 = 27; // เปลี่ยนจาก GPIO 12 เป็น 27 เพื่อเลี่ยงปัญหา Boot Strapping (MTDI Flash Voltage)
 
 // 3. ขาสำหรับคุมมอเตอร์แปรงปัดกวาด (Roller Brush)
 const int PIN_BRUSH_RELAY = 19; // ต่อผ่าน Relay หรือ MOSFET เพื่อเปิด-ปิดแปรงปัด
@@ -23,6 +23,7 @@ const int ch_L_IN1 = 0;
 const int ch_L_IN2 = 1;
 const int ch_R_IN1 = 2;
 const int ch_R_IN2 = 3;
+const int ch_BUZZER = 4; // แยก Channel 4 สำหรับ Buzzer ป้องกันเสียงกวนความถี่มอเตอร์
 
 // ==========================================
 // ตัวแปรควบคุมระบบ
@@ -44,8 +45,10 @@ bool isBuzzerPlaying = false;
 
 void playMelodyNonBlocking() {
   if (!brushState) {
-    noTone(PIN_BUZZER);
-    isBuzzerPlaying = false;
+    if (isBuzzerPlaying) {
+      ledcWrite(ch_BUZZER, 0);
+      isBuzzerPlaying = false;
+    }
     currentNote = 0; // รีเซ็ตกลับไปโน้ตตัวแรกสุด
     return;
   }
@@ -54,13 +57,18 @@ void playMelodyNonBlocking() {
   int noteDuration = noteDurations[currentNote];
   int pauseBetweenNotes = noteDuration * 1.30; // หน่วงช่องว่างระหว่างโน้ต 30%
   
-  if (!isBuzzerPlaying || (currentMillis - previousNoteTime >= pauseBetweenNotes)) {
-    noTone(PIN_BUZZER);
-    // เล่นโน้ตตัวถัดไปโดยไม่หน่วงเวลา (Non-blocking)
-    tone(PIN_BUZZER, melody[currentNote], noteDuration);
+  if (!isBuzzerPlaying) {
+    ledcWriteTone(ch_BUZZER, melody[currentNote]);
     previousNoteTime = currentMillis;
-    currentNote = (currentNote + 1) % (sizeof(melody) / sizeof(melody[0]));
     isBuzzerPlaying = true;
+  } else {
+    if (currentMillis - previousNoteTime >= noteDuration && currentMillis - previousNoteTime < pauseBetweenNotes) {
+      ledcWrite(ch_BUZZER, 0); // หยุดเสียงช่วงสั้นๆ ให้เกิดช่องไฟระหว่างตัวโน้ต
+    } else if (currentMillis - previousNoteTime >= pauseBetweenNotes) {
+      currentNote = (currentNote + 1) % (sizeof(melody) / sizeof(melody[0]));
+      ledcWriteTone(ch_BUZZER, melody[currentNote]);
+      previousNoteTime = currentMillis;
+    }
   }
 }
 
@@ -104,8 +112,10 @@ void setup() {
   pinMode(PIN_BRUSH_RELAY, OUTPUT);
   digitalWrite(PIN_BRUSH_RELAY, LOW);
   
-  pinMode(PIN_BUZZER, OUTPUT);
-  noTone(PIN_BUZZER);
+  // ตั้งค่า PWM สำหรับ Buzzer ผ่าน LEDC Channel 4 แยกอิสระ ไม่กวนความถี่มอเตอร์
+  ledcSetup(ch_BUZZER, 2000, 8);
+  ledcAttachPin(PIN_BUZZER, ch_BUZZER);
+  ledcWrite(ch_BUZZER, 0);
 
   ledcSetup(ch_L_IN1, freq, resolution);
   ledcAttachPin(PIN_L_IN1, ch_L_IN1);
@@ -177,34 +187,46 @@ void loop() {
     }
   }
   
-  // 2. ตรวจสอบคำสั่งจาก ESP32-CAM (ฝั่งพลปืน / Web UI)
-  if (Serial2.available() > 0) {
-    String camResponse = Serial2.readStringUntil('\n');
-    camResponse.trim();
-    
-    // คำสั่งขับเคลื่อนจาก Web UI (DRIVE:y,z)
-    if (camResponse.startsWith("DRIVE:")) {
-      String payload = camResponse.substring(6);
-      int commaIdx = payload.indexOf(',');
-      if(commaIdx != -1) {
+  // 2. ตรวจสอบคำสั่งจาก ESP32-CAM (ฝั่งพลปืน / Web UI แบบ Non-blocking ไม่บล็อกลูป)
+  static char rxBuf[64];
+  static uint8_t rxIdx = 0;
+  
+  while (Serial2.available() > 0) {
+    char c = Serial2.read();
+    if (c == '\n') {
+      rxBuf[rxIdx] = '\0';
+      String camResponse = String(rxBuf);
+      camResponse.trim();
+      rxIdx = 0;
+      
+      // คำสั่งขับเคลื่อนจาก Web UI (DRIVE:y,z)
+      if (camResponse.startsWith("DRIVE:")) {
+        String payload = camResponse.substring(6);
+        int commaIdx = payload.indexOf(',');
+        if (commaIdx != -1) {
           int y = payload.substring(0, commaIdx).toInt();
-          int z = payload.substring(commaIdx+1).toInt();
+          int z = payload.substring(commaIdx + 1).toInt();
           // ยอมให้ Web UI สั่งขับรถได้ ก็ต่อเมื่อจอย PS4 ไม่ได้ขยับอยู่เท่านั้น
           if (!isPS4Moving) {
             driveDifferential(y, z);
           }
+        }
+      } 
+      // คำสั่งเปิดปิดแปรงจาก Web UI (BRUSH:0 หรือ BRUSH:1)
+      else if (camResponse.startsWith("BRUSH:")) {
+        String payload = camResponse.substring(6);
+        brushState = (payload.toInt() == 1);
+        digitalWrite(PIN_BRUSH_RELAY, brushState ? HIGH : LOW);
+        Serial.println(brushState ? "Roller Brush (via Web UI): ON" : "Roller Brush (via Web UI): OFF");
       }
-    } 
-    // คำสั่งเปิดปิดแปรงจาก Web UI (BRUSH:0 หรือ BRUSH:1)
-    else if (camResponse.startsWith("BRUSH:")) {
-      String payload = camResponse.substring(6);
-      brushState = (payload.toInt() == 1);
-      digitalWrite(PIN_BRUSH_RELAY, brushState ? HIGH : LOW);
-      Serial.println(brushState ? "Roller Brush (via Web UI): ON" : "Roller Brush (via Web UI): OFF");
-    }
-    // ข้อความแจ้งสถานะอื่นๆ จากกล้อง
-    else {
-      Serial.println("[ESP32-CAM]: " + camResponse);
+      // ข้อความแจ้งสถานะอื่นๆ จากกล้อง
+      else if (camResponse.length() > 0) {
+        Serial.println("[ESP32-CAM]: " + camResponse);
+      }
+    } else if (c != '\r') {
+      if (rxIdx < sizeof(rxBuf) - 1) {
+        rxBuf[rxIdx++] = c;
+      }
     }
   }
   
@@ -217,4 +239,6 @@ void loop() {
 void printRoomStatus() {
   Serial.print("Current Room selected: ");
   Serial.println(roomNumber);
+  // ซิงค์เลขห้องไปยังบอร์ด ESP32-CAM เพื่อให้อัปเดตหน้าจอ HUD / Web UI ทันที
+  Serial2.print("ROOM:" + String(roomNumber) + "\n");
 }

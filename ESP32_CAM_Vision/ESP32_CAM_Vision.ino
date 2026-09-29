@@ -4,6 +4,7 @@
 #include <ESP32Servo.h>
 #include "mbedtls/base64.h"
 #include "esp_http_server.h"
+#include <lwip/sockets.h>
 
 // ==========================================
 // การตั้งค่าเครือข่าย (WiFi)
@@ -46,6 +47,7 @@ const int servoPin = 12;
 // ตัวแปรควบคุมระบบ Co-pilot
 // ==========================================
 httpd_handle_t camera_httpd = NULL;
+httpd_handle_t stream_httpd = NULL; // พอร์ต 81 สำหรับ Stream แยกอิสระ ป้องกันปุ่มค้าง
 bool isUploading = false;
 bool takePhotoTriggered = false;
 String targetMeterType = "";
@@ -83,7 +85,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 </head>
 <body>
     <div id="video-container">
-        <img id="video-stream" src="/stream" crossorigin="anonymous" alt="Live Stream">
+        <img id="video-stream" src="" crossorigin="anonymous" alt="Live Stream (Port 81)">
     </div>
     
     <div class="hud" id="top-bar">
@@ -167,8 +169,8 @@ const char index_html[] PROGMEM = R"rawliteral(
 
         function checkUploadStatus() {
             setTimeout(() => {
-                fetch('/status').then(res => res.text()).then(txt => {
-                    if(txt === "IDLE") {
+                fetch('/status').then(res => res.json()).then(data => {
+                    if(data.status === "IDLE") {
                         isUploading = false;
                         loadingOverlay.style.display = 'none';
                         log("Upload Complete! Stream Resumed.");
@@ -178,6 +180,18 @@ const char index_html[] PROGMEM = R"rawliteral(
                 }).catch(e => checkUploadStatus());
             }, 1000);
         }
+
+        // ซิงค์เลขห้องจากบอร์ดล่างขึ้นหน้าจอ HUD อัตโนมัติทุกๆ 2000ms (ลดภาระคลื่น WiFi เพื่อป้องกันสตรีมสะดุด)
+        setInterval(() => {
+            if(!isUploading) {
+                fetch('/status').then(res => res.json()).then(data => {
+                    if(data.room && data.room !== roomNum) {
+                        roomNum = data.room;
+                        roomDisp.innerText = roomNum;
+                    }
+                }).catch(()=>{});
+            }
+        }, 2000);
 
         let lastBtnState = {};
         
@@ -223,6 +237,12 @@ const char index_html[] PROGMEM = R"rawliteral(
             }
             setTimeout(() => requestAnimationFrame(updateLoop), 100); 
         }
+
+        // กำหนด URL สตรีมไปที่พอร์ต 81 แยกอิสระ ป้องกันการบล็อกปุ่มบนพอร์ต 80
+        const streamImg = document.getElementById("video-stream");
+        if (streamImg) {
+            streamImg.src = window.location.protocol + "//" + window.location.hostname + ":81/stream";
+        }
     </script>
 </body>
 </html>
@@ -238,9 +258,9 @@ esp_err_t index_handler(httpd_req_t *req) {
 }
 
 esp_err_t status_handler(httpd_req_t *req) {
-    httpd_resp_set_type(req, "text/plain");
-    if(isUploading) return httpd_resp_send(req, "UPLOADING", 9);
-    return httpd_resp_send(req, "IDLE", 4);
+    httpd_resp_set_type(req, "application/json");
+    String json = "{\"status\":\"" + String(isUploading ? "UPLOADING" : "IDLE") + "\",\"room\":\"" + currentRoomNumber + "\"}";
+    return httpd_resp_send(req, json.c_str(), json.length());
 }
 
 esp_err_t action_handler(httpd_req_t *req) {
@@ -297,10 +317,20 @@ static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %
 esp_err_t stream_handler(httpd_req_t *req) {
     camera_fb_t * fb = NULL;
     esp_err_t res = ESP_OK;
-    char * part_buf[64];
+    char part_buf[64];
+    static int64_t last_fps_time = 0;
+    static uint32_t frame_count = 0;
+
+    int sockfd = httpd_req_to_sockfd(req);
+    if (sockfd >= 0) {
+        int enable = 1;
+        setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, (char*)&enable, sizeof(enable));
+    }
 
     res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
     if(res != ESP_OK) return res;
+
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
 
     while (true) {
         if (isUploading || takePhotoTriggered) {
@@ -314,8 +344,18 @@ esp_err_t stream_handler(httpd_req_t *req) {
             Serial.println("Camera capture failed");
             res = ESP_FAIL;
         } else {
-            size_t hlen = snprintf((char *)part_buf, 64, _STREAM_PART, fb->len);
-            res = httpd_resp_send_chunk(req, (const char *)part_buf, hlen);
+            // คำนวณและแสดงสถานะ FPS บน Serial Monitor ทุกๆ 2 วินาที
+            frame_count++;
+            int64_t now = esp_timer_get_time();
+            if (now - last_fps_time >= 2000000) {
+                float fps = (float)frame_count * 1000000.0 / (float)(now - last_fps_time);
+                frame_count = 0;
+                last_fps_time = now;
+                Serial.printf("[Stream] FPS: %.1f | Frame: %u B\n", fps, fb->len);
+            }
+
+            size_t hlen = snprintf(part_buf, 64, _STREAM_PART, fb->len);
+            res = httpd_resp_send_chunk(req, part_buf, hlen);
             if(res == ESP_OK){
                 res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
             }
@@ -325,24 +365,37 @@ esp_err_t stream_handler(httpd_req_t *req) {
             esp_camera_fb_return(fb);
         }
         if(res != ESP_OK) break; // Client disconnected
+
+
     }
     return res;
 }
 
 void startCameraServer() {
+    // 1. Web Server พอร์ต 80 สำหรับหน้าเว็บ HTML, ปุ่มกด และอ่านสถานะ
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
+    config.ctrl_port = 32768;
 
     httpd_uri_t index_uri = { .uri = "/", .method = HTTP_GET, .handler = index_handler, .user_ctx = NULL };
-    httpd_uri_t stream_uri = { .uri = "/stream", .method = HTTP_GET, .handler = stream_handler, .user_ctx = NULL };
     httpd_uri_t action_uri = { .uri = "/action", .method = HTTP_GET, .handler = action_handler, .user_ctx = NULL };
     httpd_uri_t status_uri = { .uri = "/status", .method = HTTP_GET, .handler = status_handler, .user_ctx = NULL };
 
     if (httpd_start(&camera_httpd, &config) == ESP_OK) {
         httpd_register_uri_handler(camera_httpd, &index_uri);
-        httpd_register_uri_handler(camera_httpd, &stream_uri);
         httpd_register_uri_handler(camera_httpd, &action_uri);
         httpd_register_uri_handler(camera_httpd, &status_uri);
+    }
+
+    // 2. Stream Server พอร์ต 81 แยกอิสระ 100% ป้องกันการบล็อกปุ่มควบคุม
+    httpd_config_t config_stream = HTTPD_DEFAULT_CONFIG();
+    config_stream.server_port = 81;
+    config_stream.ctrl_port = 32769;
+
+    httpd_uri_t stream_uri = { .uri = "/stream", .method = HTTP_GET, .handler = stream_handler, .user_ctx = NULL };
+
+    if (httpd_start(&stream_httpd, &config_stream) == ESP_OK) {
+        httpd_register_uri_handler(stream_httpd, &stream_uri);
     }
 }
 
@@ -353,6 +406,7 @@ void startCameraServer() {
 void setup() {
   Serial.begin(115200);
   
+  ESP32PWM::allocateTimer(1); // บังคับให้ Servo ใช้ Timer 1 ป้องกันชนกับ Timer 0 ของกล้อง (XCLK)
   camServo.setPeriodHertz(50);
   camServo.attach(servoPin, 500, 2400);
   camServo.write(90);
@@ -363,6 +417,7 @@ void setup() {
     delay(500);
     Serial.print(".");
   }
+  WiFi.setSleep(false); // ปิดโหมดประหยัดพลังงาน เพื่อความลื่นไหลและปิงนิ่ง ไม่สะดุด
   Serial.println("\nWiFi connected. IP: ");
   Serial.println(WiFi.localIP());
 
@@ -388,13 +443,14 @@ void setup() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG; 
   
-  // ตั้งเป็น VGA สำหรับให้สตรีมภาพได้ลื่นไหล ไม่กระตุก
+  // เริ่มต้นด้วยขนาดสูงสุดของเซนเซอร์ OV2640 (UXGA 1600x1200 2MP) เพื่อจองบัฟเฟอร์ให้พอ
   if(psramFound()){
-    config.frame_size = FRAMESIZE_VGA; 
+    config.frame_size = FRAMESIZE_UXGA; 
     config.jpeg_quality = 12;
     config.fb_count = 2;
+    config.grab_mode = CAMERA_GRAB_LATEST; // ดึงเฟรมใหม่ล่าสุดเสมอ ตัดปัญหาเฟรมค้างคิวกระตุก
   } else {
-    config.frame_size = FRAMESIZE_VGA; 
+    config.frame_size = FRAMESIZE_SVGA; 
     config.jpeg_quality = 12;
     config.fb_count = 1;
   }
@@ -405,25 +461,49 @@ void setup() {
     return;
   }
 
+  // หลังจองบัฟเฟอร์สำเร็จ สลับเซนเซอร์ลงมาเป็น QQVGA (160x120) ทันที เพื่อให้ Live Stream ลื่นสุด 25+ FPS
+  sensor_t * s = esp_camera_sensor_get();
+  if (s != NULL) {
+    s->set_framesize(s, FRAMESIZE_QQVGA);
+    s->set_quality(s, 40); // ปรับคุณภาพเป็น 40 เพื่อลดขนาดไฟล์ลงเหลือ ~1-2KB สปีดสตรีมพุ่งสูงสุด
+    s->set_gainceiling(s, GAINCEILING_8X); // ขยายขีดจำกัด Gain เพื่อป้องกันไม่ให้ชิปดรอปความเร็วชัตเตอร์ในห้อง
+  }
+
   startCameraServer();
-  Serial.println("Web Server & Camera Ready!");
+  Serial.println("Web Server & Camera Ready (Fast QVGA Stream Mode)!");
 }
 
 void loop() {
-  // รับคำสั่งจากบอร์ดหลักทาง Serial (จอย PS4)
-  if (Serial.available() > 0) {
-    String command = Serial.readStringUntil('\n');
-    command.trim();
-    
-    if (command.startsWith("WATER:")) {
-      currentRoomNumber = command.substring(6);
-      targetMeterType = "WATER";
-      takePhotoTriggered = true;
-    } 
-    else if (command.startsWith("ELEC:")) {
-      currentRoomNumber = command.substring(5);
-      targetMeterType = "ELEC";
-      takePhotoTriggered = true;
+  // รับคำสั่งจากบอร์ดหลักทาง Serial (จอย PS4) แบบ Non-blocking
+  static char camRxBuf[64];
+  static uint8_t camRxIdx = 0;
+  
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c == '\n') {
+      camRxBuf[camRxIdx] = '\0';
+      String command = String(camRxBuf);
+      command.trim();
+      camRxIdx = 0;
+      
+      if (command.startsWith("ROOM:")) {
+        currentRoomNumber = command.substring(5);
+        Serial.println("[Sync] Room updated: " + currentRoomNumber);
+      }
+      else if (command.startsWith("WATER:")) {
+        currentRoomNumber = command.substring(6);
+        targetMeterType = "WATER";
+        takePhotoTriggered = true;
+      } 
+      else if (command.startsWith("ELEC:")) {
+        currentRoomNumber = command.substring(5);
+        targetMeterType = "ELEC";
+        takePhotoTriggered = true;
+      }
+    } else if (c != '\r') {
+      if (camRxIdx < sizeof(camRxBuf) - 1) {
+        camRxBuf[camRxIdx++] = c;
+      }
     }
   }
 
@@ -441,17 +521,25 @@ void loop() {
 
 void takeAndSendPhoto(String meterType, String roomNumberStr) {
   sensor_t * s = esp_camera_sensor_get();
+  if (s == NULL) return;
   
-  // 1. ปรับสลับความละเอียดเป็นสูงสุด 3MP (QXGA)
-  Serial.println("Switching to 3MP (QXGA) Mode...");
-  s->set_framesize(s, FRAMESIZE_QXGA);
+  // 1. ปรับสลับความละเอียดเป็นสูงสุด UXGA (1600x1200 2MP) สำหรับเซนเซอร์ OV2640
+  Serial.println("Switching to 2MP (UXGA) High-Res Mode...");
+  s->set_framesize(s, FRAMESIZE_UXGA);
+  s->set_quality(s, 10);
   delay(1000); // รอ Auto-Exposure ปรับแสงให้เข้าที่ 1 วินาที
+  
+  // ทิ้งเฟรมเก่าที่ค้างในคิว FIFO 1 เฟรม เพื่อให้ได้ภาพความละเอียดสูงเฟรมใหม่จริงๆ
+  camera_fb_t * dummy_fb = esp_camera_fb_get();
+  if (dummy_fb) esp_camera_fb_return(dummy_fb);
   
   // 2. ถ่ายภาพ
   camera_fb_t * fb = esp_camera_fb_get();  
   if(!fb) {
     Serial.println("High-res capture failed");
-    s->set_framesize(s, FRAMESIZE_VGA); 
+    s->set_framesize(s, FRAMESIZE_QQVGA); 
+    s->set_quality(s, 40);
+    s->set_gainceiling(s, GAINCEILING_8X);
     return;
   }
   Serial.println("Photo captured. Size: " + String(fb->len) + " bytes");
@@ -464,7 +552,9 @@ void takeAndSendPhoto(String meterType, String roomNumberStr) {
   if (base64_buf == NULL) {
     Serial.println("Base64 memory allocation failed");
     esp_camera_fb_return(fb);
-    s->set_framesize(s, FRAMESIZE_VGA); 
+    s->set_framesize(s, FRAMESIZE_QQVGA); 
+    s->set_quality(s, 40);
+    s->set_gainceiling(s, GAINCEILING_8X);
     return;
   }
   
@@ -479,11 +569,13 @@ void takeAndSendPhoto(String meterType, String roomNumberStr) {
   jsonPayload += "\"meter_type\":\"" + meterType + "\",";
   jsonPayload += "\"image_base64\":\"" + base64String + "\"";
   jsonPayload += "}";
-  base64String = ""; // Clear RAM
+  base64String = ""; // คืนหน่วยความจำทันที
   
   if(WiFi.status() == WL_CONNECTED){
     HTTPClient http;
     http.begin(serverName);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); // สำคัญมากสำหรับ Google Apps Script (HTTP 302 Redirect)
+    http.setTimeout(15000);
     http.addHeader("Content-Type", "application/json");
     Serial.println("Uploading to Google Drive...");
     int code = http.POST(jsonPayload);
@@ -495,7 +587,9 @@ void takeAndSendPhoto(String meterType, String roomNumberStr) {
     http.end();
   }
   
-  // 5. ปรับความละเอียดกลับไปเป็นโหมดสตรีม (VGA)
-  Serial.println("Returning to Stream (VGA) Mode...");
-  s->set_framesize(s, FRAMESIZE_VGA);
+  // 5. ปรับความละเอียดกลับไปเป็นโหมดสตรีมเร็วสุด (QQVGA 160x120)
+  Serial.println("Returning to Fast Stream (QQVGA) Mode...");
+  s->set_framesize(s, FRAMESIZE_QQVGA);
+  s->set_quality(s, 40);
+  s->set_gainceiling(s, GAINCEILING_8X);
 }
