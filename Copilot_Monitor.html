@@ -1,0 +1,829 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HydroLog Co-pilot Console & AI Meter Logger</title>
+    <style>
+        :root {
+            --primary: #00ffcc;
+            --primary-glow: rgba(0, 255, 204, 0.4);
+            --water-color: #00ccff;
+            --elec-color: #ffcc00;
+            --brush-color: #b026ff;
+            --bg-dark: #0a0e17;
+            --card-bg: #131b2e;
+            --card-border: #1e293b;
+        }
+
+        body { 
+            background: var(--bg-dark); 
+            color: #f1f5f9; 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            text-align: center; 
+            margin: 0; 
+            padding: 15px; 
+        }
+
+        .container { 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            max-width: 820px; 
+            margin: 0 auto; 
+        }
+
+        .header-title {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        h2 { 
+            margin: 0;
+            color: var(--primary); 
+            text-shadow: 0 0 12px var(--primary-glow); 
+            font-size: 24px;
+            letter-spacing: 1px;
+        }
+
+        .badge-status {
+            background: #1e293b;
+            color: #94a3b8;
+            border: 1px solid #334155;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .badge-status.online {
+            color: #22c55e;
+            border-color: #22c55e;
+            box-shadow: 0 0 8px rgba(34, 197, 94, 0.3);
+        }
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: currentColor;
+            display: inline-block;
+        }
+        
+        /* แถบเชื่อมต่อ IP */
+        .top-bar { 
+            display: flex; 
+            gap: 8px; 
+            align-items: center; 
+            justify-content: center; 
+            flex-wrap: wrap; 
+            margin-bottom: 12px; 
+            background: var(--card-bg);
+            padding: 8px 14px;
+            border-radius: 8px;
+            border: 1px solid var(--card-border);
+            width: 640px;
+            box-sizing: border-box;
+        }
+        
+        .top-bar label {
+            font-size: 13px;
+            font-weight: bold;
+            color: #94a3b8;
+        }
+
+        .btn-quick {
+            background: #1e293b;
+            color: var(--primary);
+            border: 1px solid #334155;
+            border-radius: 4px;
+            padding: 6px 10px;
+            font-size: 12px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        .btn-quick:hover {
+            background: #334155;
+            border-color: var(--primary);
+        }
+        
+        /* Section กรอกเลขห้อง */
+        .room-bar {
+            width: 640px;
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 8px;
+            padding: 10px 16px;
+            margin-bottom: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            box-sizing: border-box;
+        }
+        .room-row-main {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .room-label-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            font-weight: bold;
+            color: #cbd5e1;
+        }
+        .room-input-group {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .btn-step {
+            background: #1e293b;
+            color: var(--primary);
+            border: 1px solid #334155;
+            border-radius: 5px;
+            padding: 6px 14px;
+            font-size: 15px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-step:hover { background: var(--primary); color: #000; border-color: var(--primary); }
+        
+        #roomNumber {
+            width: 90px;
+            font-size: 20px;
+            font-weight: bold;
+            color: var(--primary);
+            background: #000;
+            border: 2px solid var(--primary);
+            border-radius: 6px;
+            padding: 4px 8px;
+            text-align: center;
+            letter-spacing: 2px;
+            box-shadow: 0 0 8px rgba(0, 255, 204, 0.3);
+        }
+        #roomNumber:focus {
+            outline: none;
+            box-shadow: 0 0 12px rgba(0, 255, 204, 0.7);
+        }
+        
+        .floor-quick-buttons {
+            display: flex;
+            gap: 6px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        .btn-floor {
+            background: #1e293b;
+            color: #94a3b8;
+            border: 1px solid #334155;
+            border-radius: 4px;
+            padding: 4px 10px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .btn-floor:hover {
+            background: #334155;
+            color: var(--primary);
+            border-color: #475569;
+        }
+        .btn-floor.active {
+            background: var(--primary);
+            color: #000;
+            font-weight: bold;
+            border-color: var(--primary);
+        }
+        
+        /* หน้าจอสตรีมภาพสด */
+        .stream-container { 
+            position: relative; 
+            width: 640px; 
+            height: 480px; 
+            background: #000;
+            border: 3px solid var(--primary); 
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+        }
+        .stream { 
+            width: 100%; 
+            height: 100%; 
+            object-fit: contain; 
+            display: block;
+        }
+
+        /* กรอบเล็งเป้า HUD Reticle (ตรงกับ ROI 120,140 ถึง 520,340) */
+        .hud-reticle {
+            position: absolute;
+            left: 120px;
+            top: 140px;
+            width: 400px;
+            height: 200px;
+            border: 2px dashed rgba(0, 255, 204, 0.8);
+            border-radius: 8px;
+            box-shadow: inset 0 0 15px rgba(0, 255, 204, 0.15);
+            pointer-events: none;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px;
+            transition: opacity 0.3s;
+        }
+        .hud-reticle.hide {
+            display: none;
+        }
+        .hud-label {
+            background: rgba(0, 0, 0, 0.65);
+            color: var(--primary);
+            font-size: 11px;
+            font-weight: bold;
+            padding: 2px 8px;
+            border-radius: 4px;
+            letter-spacing: 1px;
+        }
+        .hud-corners {
+            position: absolute;
+            width: 16px;
+            height: 16px;
+            border: 3px solid var(--primary);
+        }
+        .corner-tl { top: -2px; left: -2px; border-right: none; border-bottom: none; }
+        .corner-tr { top: -2px; right: -2px; border-left: none; border-bottom: none; }
+        .corner-bl { bottom: -2px; left: -2px; border-right: none; border-top: none; }
+        .corner-br { bottom: -2px; right: -2px; border-left: none; border-top: none; }
+
+        .reticle-toggle-btn {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.6);
+            color: #94a3b8;
+            border: 1px solid #334155;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            cursor: pointer;
+            z-index: 10;
+        }
+        .reticle-toggle-btn:hover { color: white; border-color: var(--primary); }
+
+        /* การ์ดผลลัพธ์ OCR สด */
+        .ocr-card {
+            width: 640px;
+            background: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            margin-top: 12px;
+            padding: 12px 16px;
+            box-sizing: border-box;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.4);
+        }
+        .ocr-left {
+            text-align: left;
+        }
+        .ocr-title {
+            font-size: 12px;
+            color: #94a3b8;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .ocr-number {
+            font-size: 32px;
+            font-weight: 900;
+            color: #4ade80;
+            letter-spacing: 2px;
+            line-height: 1.1;
+            text-shadow: 0 0 10px rgba(74, 222, 128, 0.3);
+        }
+        .ocr-meta {
+            font-size: 12px;
+            color: #64748b;
+            margin-top: 2px;
+        }
+        .ocr-badge {
+            background: #1e293b;
+            color: #38bdf8;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: bold;
+            border: 1px solid #0284c7;
+        }
+
+        /* ปุ่มคำสั่ง */
+        .controls { 
+            margin-top: 12px; 
+            display: flex; 
+            gap: 10px; 
+            width: 640px; 
+            justify-content: center; 
+        }
+        .btn { 
+            padding: 10px 16px; 
+            font-size: 15px; 
+            font-weight: bold; 
+            cursor: pointer; 
+            border: none; 
+            border-radius: 6px; 
+            transition: transform 0.1s, filter 0.2s; 
+        }
+        .btn:active { transform: scale(0.97); }
+        .btn-water { background: var(--water-color); color: #000; flex: 1; box-shadow: 0 4px 10px rgba(0, 204, 255, 0.3); }
+        .btn-water:hover { filter: brightness(1.1); }
+        .btn-elec { background: var(--elec-color); color: #000; flex: 1; box-shadow: 0 4px 10px rgba(255, 204, 0, 0.3); }
+        .btn-elec:hover { filter: brightness(1.1); }
+        .btn-brush { background: var(--brush-color); color: white; width: 150px; box-shadow: 0 4px 10px rgba(176, 38, 255, 0.3); }
+        .btn-brush:hover { filter: brightness(1.1); }
+        .btn-brush.active { background: #22c55e; color: black; }
+        
+        .room-tag {
+            display: inline-block;
+            background: rgba(0,0,0,0.25);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 13px;
+            margin-left: 4px;
+        }
+        
+        .status { 
+            margin-top: 10px; 
+            padding: 10px 14px; 
+            background: var(--card-bg); 
+            border: 1px solid var(--card-border); 
+            border-radius: 6px; 
+            color: #94a3b8; 
+            width: 612px; 
+            font-size: 13px; 
+            text-align: left; 
+        }
+        
+        .keyboard-hint { 
+            margin-top: 10px; 
+            color: var(--primary); 
+            background: var(--card-bg); 
+            border: 1px solid var(--card-border); 
+            padding: 12px 16px; 
+            border-radius: 8px; 
+            text-align: left; 
+            width: 608px; 
+            font-size: 12px; 
+            line-height: 1.6; 
+        }
+        
+        input[type="text"] { 
+            padding: 6px 10px; 
+            font-size: 14px; 
+            border-radius: 5px; 
+            border: 1px solid #334155; 
+            background: #0f172a; 
+            color: white; 
+            text-align: center; 
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header-title">
+            <h2>🤖 HydroLog Co-pilot Console</h2>
+            <div class="badge-status" id="connBadge">
+                <span class="status-dot"></span>
+                <span id="connBadgeText">ยังไม่เชื่อมต่อ</span>
+            </div>
+        </div>
+        
+        <!-- แถบเชื่อมต่อ IP -->
+        <div class="top-bar">
+            <label>📡 ปลายทาง Pi 5 / กล้อง: </label>
+            <input type="text" id="camIp" placeholder="number13.local:5000" style="width: 170px;" />
+            <button class="btn-quick" onclick="quickFill('number13.local:5000')">⚡ Pi 5 LAN</button>
+            <button class="btn-quick" onclick="quickFill('10.140.148.215:5000')">📶 Wi-Fi</button>
+            <button class="btn" style="background:#0284c7; color:white; padding: 6px 14px; font-size: 13px;" onclick="startStream()">เชื่อมต่อ</button>
+            <button class="btn" style="background:#dc2626; color:white; padding: 6px 10px; font-size: 13px;" onclick="stopStream()">พักกล้อง</button>
+        </div>
+
+        <!-- แถบระบุเลขห้อง (Room Selector) -->
+        <div class="room-bar">
+            <div class="room-row-main">
+                <div class="room-label-group">
+                    <span>🏢 เลขห้องเป้าหมาย (Target Room):</span>
+                </div>
+                <div class="room-input-group">
+                    <button class="btn-step" onclick="stepRoom(-1)" title="ห้องก่อนหน้า (ลด 1 ห้อง)">◀</button>
+                    <input type="text" id="roomNumber" value="101" maxlength="3" oninput="onRoomInput()" placeholder="101-510" />
+                    <button class="btn-step" onclick="stepRoom(1)" title="ห้องถัดไป (เพิ่ม 1 ห้อง)">▶</button>
+                </div>
+            </div>
+            <!-- ปุ่มลัดเลือกชั้น -->
+            <div class="floor-quick-buttons">
+                <span style="font-size: 11px; color: #64748b; align-self: center;">ชั้น:</span>
+                <button class="btn-floor active" id="f1" onclick="selectFloor(1)">ชั้น 1 (101)</button>
+                <button class="btn-floor" id="f2" onclick="selectFloor(2)">ชั้น 2 (201)</button>
+                <button class="btn-floor" id="f3" onclick="selectFloor(3)">ชั้น 3 (301)</button>
+                <button class="btn-floor" id="f4" onclick="selectFloor(4)">ชั้น 4 (401)</button>
+                <button class="btn-floor" id="f5" onclick="selectFloor(5)">ชั้น 5 (501)</button>
+            </div>
+        </div>
+
+        <!-- หน้าจอสตรีมภาพสด -->
+        <div class="stream-container">
+            <img id="videoStream" class="stream" alt="รอการเชื่อมต่อกล้อง..." />
+            
+            <!-- กรอบเล็งเป้า HUD Reticle -->
+            <div class="hud-reticle" id="hudReticle">
+                <div class="hud-corners corner-tl"></div>
+                <div class="hud-corners corner-tr"></div>
+                <div class="hud-corners corner-bl"></div>
+                <div class="hud-corners corner-br"></div>
+                <div class="hud-label">🎯 เล็งเป้าตัวเลขมิเตอร์ในกรอบนี้ (ROI)</div>
+                <div style="font-size: 10px; color: rgba(255,255,255,0.4);">RAPIDOCR DEEP LEARNING AREA</div>
+            </div>
+
+            <button class="reticle-toggle-btn" onclick="toggleReticle()">👁️ เปิด/ปิด กรอบเล็ง</button>
+        </div>
+        
+        <!-- การ์ดผลลัพธ์ On-Device AI OCR -->
+        <div class="ocr-card">
+            <div class="ocr-left">
+                <div class="ocr-title">ผลการตรวจจับมิเตอร์ล่าสุด (ON-DEVICE AI OCR)</div>
+                <div class="ocr-number" id="ocrValue">-</div>
+                <div class="ocr-meta">
+                    ความมั่นใจ: <span id="ocrConf" style="color: #38bdf8;">-</span> | 
+                    เวลาประมวลผล: <span id="ocrTime" style="color: #e2e8f0;">-</span> ms |
+                    ห้อง: <span id="ocrRoom" style="color: var(--primary);">-</span>
+                </div>
+            </div>
+            <div class="ocr-badge" id="ocrTypeBadge">พร้อมสแกน</div>
+        </div>
+
+        <!-- ปุ่มคำสั่งถ่ายภาพและแปรงปัด -->
+        <div class="controls">
+            <button class="btn btn-water" onclick="sendPhoto('water')">
+                💧 ถ่ายมิเตอร์น้ำ <span class="room-tag" id="tagWater">ห้อง 101</span>
+            </button>
+            <button class="btn btn-elec" onclick="sendPhoto('electricity')">
+                ⚡ ถ่ายมิเตอร์ไฟ <span class="room-tag" id="tagElec">ห้อง 101</span>
+            </button>
+            <button class="btn btn-brush" id="brushBtn" onclick="toggleBrush()">
+                🧹 แปรงขัด: ปิด
+            </button>
+        </div>
+        
+        <div class="status" id="statusText">รอการเชื่อมต่อ... กรุณาระบุ IP หรือ Hostname ของ Pi 5 แล้วกด "เชื่อมต่อ"</div>
+
+        <div class="keyboard-hint">
+            <strong>⌨️ ระบบควบคุมแป้นพิมพ์ & จอย (Keyboard & Co-pilot Controls):</strong><br>
+            • ขับเคลื่อนรถ: <b>W A S D</b> (หยุดรถอัตโนมัติเมื่อปล่อยปุ่ม หรือสลับหน้าต่าง)<br>
+            • กล้อง 2-DOF: <b>ลูกศร ขึ้น/ลง</b> (Tilt ก้ม-เงย) | <b>ลูกศร ซ้าย/ขวา</b> (Pan กวาดมุม)<br>
+            • แปรงขัด: ปุ่ม <b>Spacebar</b> | สั่งถ่ายภาพ: ปุ่ม <b>1</b> (มิเตอร์น้ำ), ปุ่ม <b>2</b> (มิเตอร์ไฟ)<br>
+            • รองรับจอย PS4/Xbox USB: ก้านซ้าย=ขับรถ, ก้านขวา=คุมมุมกล้อง, ปุ่ม X/Square=ถ่ายภาพ
+        </div>
+    </div>
+
+    <script>
+        let host = "";
+        let isMoving = false;
+        let brushState = false;
+        let lastPhotoTrigger = 0;
+        let showReticle = true;
+        
+        // โหลดค่า Host และเลขห้องเดิมที่บันทึกไว้ในเบราว์เซอร์
+        window.addEventListener('DOMContentLoaded', () => {
+            let savedHost = localStorage.getItem("copilot_host") || "number13.local:5000";
+            document.getElementById("camIp").value = savedHost;
+            let savedRoom = localStorage.getItem("copilot_room_number") || "101";
+            document.getElementById("roomNumber").value = savedRoom;
+            updateRoomUI(savedRoom);
+        });
+
+        function quickFill(val) {
+            document.getElementById("camIp").value = val;
+            startStream();
+        }
+
+        function toggleReticle() {
+            showReticle = !showReticle;
+            let ret = document.getElementById("hudReticle");
+            if (showReticle) ret.classList.remove("hide");
+            else ret.classList.add("hide");
+        }
+
+        // --- ฟังก์ชันจัดการเลขห้อง ---
+        let roomDebounceTimer = null;
+
+        function getValidatedRoom() {
+            let val = document.getElementById("roomNumber").value.trim();
+            let num = parseInt(val, 10);
+            if (isNaN(num)) return "101";
+            if (num < 101) return "101";
+            if (num > 510) return "510";
+            return num.toString();
+        }
+
+        function onRoomInput() {
+            let room = getValidatedRoom();
+            localStorage.setItem("copilot_room_number", room);
+            updateRoomUI(room);
+            if (host) {
+                clearTimeout(roomDebounceTimer);
+                roomDebounceTimer = setTimeout(() => {
+                    sendCommand(`/action?room=${encodeURIComponent(room)}`);
+                }, 300);
+            }
+        }
+
+        function updateRoomUI(room) {
+            document.getElementById("tagWater").innerText = `ห้อง ${room}`;
+            document.getElementById("tagElec").innerText = `ห้อง ${room}`;
+            
+            let floor = Math.floor(parseInt(room, 10) / 100);
+            for (let f = 1; f <= 5; f++) {
+                let btn = document.getElementById(`f${f}`);
+                if (btn) {
+                    if (f === floor) btn.classList.add("active");
+                    else btn.classList.remove("active");
+                }
+            }
+        }
+
+        function stepRoom(step) {
+            let current = parseInt(getValidatedRoom(), 10);
+            let floor = Math.floor(current / 100);
+            let roomInFloor = current % 100;
+
+            roomInFloor += step;
+            if (roomInFloor > 10) {
+                floor++;
+                roomInFloor = 1;
+            } else if (roomInFloor < 1) {
+                floor--;
+                roomInFloor = 10;
+            }
+
+            if (floor > 5) { floor = 1; roomInFloor = 1; }
+            if (floor < 1) { floor = 5; roomInFloor = 10; }
+
+            let num = floor * 100 + roomInFloor;
+            document.getElementById("roomNumber").value = num;
+            onRoomInput();
+        }
+
+        function selectFloor(floor) {
+            let num = floor * 100 + 1;
+            document.getElementById("roomNumber").value = num;
+            onRoomInput();
+        }
+
+        // --- ฟังก์ชันจัดการสตรีมภาพและกล้อง ---
+        function parseHost(input) {
+            input = input.trim();
+            if (!input) return "";
+            input = input.replace(/^https?:\/\//, ''); // ตัด protocol
+            // ถ้าไม่ระบุพอร์ต ให้ใส่พอร์ต 5000 เป็นค่าเริ่มต้นสำหรับ Pi 5
+            if (!input.includes(':')) {
+                input = `${input}:5000`;
+            }
+            return input;
+        }
+
+        function startStream() {
+            let rawInput = document.getElementById("camIp").value.trim();
+            host = parseHost(rawInput);
+            if(!host) { alert("กรุณาระบุ Hostname หรือ IP ของ Pi 5 ก่อนครับ"); return; }
+            localStorage.setItem("copilot_host", host);
+            
+            let streamUrl = `http://${host}/stream`;
+            let img = document.getElementById("videoStream");
+            img.src = streamUrl;
+            
+            img.onload = () => {
+                setConnectionStatus(true);
+            };
+            img.onerror = () => {
+                setConnectionStatus(false);
+            };
+
+            setConnectionStatus(true);
+            document.getElementById("statusText").innerHTML = `📡 เชื่อมต่อกล้องที่ <b>${host}</b> สำเร็จแล้ว (กำลังสตรีมสด 640x480)...`;
+            
+            let room = getValidatedRoom();
+            sendCommand(`/action?room=${encodeURIComponent(room)}`);
+        }
+
+        function stopStream() {
+            document.getElementById("videoStream").src = "";
+            document.getElementById("videoStream").alt = "พักหน้าจอ (หยุดสตรีมแล้ว)";
+            document.getElementById("statusText").innerText = "หยุดการสตรีมภาพเพื่อลดความร้อนและประหยัดพลังงานแล้ว";
+            setConnectionStatus(false);
+        }
+
+        function setConnectionStatus(online) {
+            let badge = document.getElementById("connBadge");
+            let text = document.getElementById("connBadgeText");
+            if (online) {
+                badge.classList.add("online");
+                text.innerText = `ONLINE (${host})`;
+            } else {
+                badge.classList.remove("online");
+                text.innerText = "OFFLINE";
+            }
+        }
+
+        function sendCommand(path) {
+            if (!host) return;
+            fetch(`http://${host}${path}`, { mode: 'no-cors' }).catch(e => console.log("Fetch Error:", e));
+        }
+
+        // ถ่ายภาพและรับผลลัพธ์ OCR สดจาก Pi 5
+        function sendPhoto(type) {
+            let room = getValidatedRoom();
+            let now = Date.now();
+            if (now - lastPhotoTrigger < 2000) return; // Debounce 2 วิ
+            lastPhotoTrigger = now;
+            
+            let typeName = (type === 'water') ? 'มิเตอร์น้ำ' : 'มิเตอร์ไฟ';
+            document.getElementById("statusText").innerHTML = `📸 กำลังถ่ายภาพและประมวลผล RapidOCR <b>${typeName}</b> สำหรับ <b>ห้อง ${room}</b>...`;
+            document.getElementById("ocrTypeBadge").innerText = `กำลังอ่าน ${typeName}...`;
+            document.getElementById("ocrValue").innerText = "⏳...";
+
+            if (!host) {
+                document.getElementById("statusText").innerText = "⚠️ ยังไม่ได้เชื่อมต่อกับ Pi 5 กรุณากดเชื่อมต่อก่อน";
+                return;
+            }
+
+            fetch(`http://${host}/action?photo=${type}&room=${encodeURIComponent(room)}`)
+                .then(res => res.json())
+                .then(data => {
+                    console.log("OCR Result:", data);
+                    document.getElementById("ocrValue").innerText = data.reading || "ไม่พบตัวเลข";
+                    document.getElementById("ocrConf").innerText = data.confidence || "-";
+                    document.getElementById("ocrTime").innerText = data.time_ms || "-";
+                    document.getElementById("ocrRoom").innerText = data.room || room;
+                    document.getElementById("ocrTypeBadge").innerText = (data.type === 'WATER' ? '💧 มิเตอร์น้ำ' : '⚡ มิเตอร์ไฟ');
+                    
+                    document.getElementById("statusText").innerHTML = `✅ สแกนสำเร็จ! ห้อง <b>${data.room}</b> อ่านค่าได้: <b>${data.reading}</b> (ความมั่นใจ ${data.confidence}, เวลา ${data.time_ms} ms)`;
+                })
+                .catch(err => {
+                    console.error("OCR Request Error:", err);
+                    document.getElementById("statusText").innerHTML = `⚠️ ส่งคำสั่งถ่ายภาพแล้ว (โหมด Fallback / สัญญาณตอบกลับขัดข้อง)`;
+                    document.getElementById("ocrTypeBadge").innerText = "ส่งคำสั่งแล้ว";
+                });
+        }
+
+        function toggleBrush() {
+            brushState = !brushState;
+            let btn = document.getElementById("brushBtn");
+            if (brushState) {
+                btn.classList.add("active");
+                btn.innerText = "🧹 แปรงขัด: เปิด (ON)";
+                sendCommand('/action?brush=1');
+            } else {
+                btn.classList.remove("active");
+                btn.innerText = "🧹 แปรงขัด: ปิด (OFF)";
+                sendCommand('/action?brush=0');
+            }
+        }
+        
+        // --- Keyboard Controls (WASD, Arrows, Space, 1, 2) ---
+        let keys = { 
+            w: false, a: false, s: false, d: false, 
+            arrowup: false, arrowdown: false, arrowleft: false, arrowright: false 
+        };
+        
+        document.addEventListener('keydown', (e) => {
+            if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) {
+                return;
+            }
+            const k = e.key.toLowerCase();
+
+            // ปุ่มลัดพิเศษ
+            if (k === ' ') {
+                e.preventDefault();
+                toggleBrush();
+                return;
+            }
+            if (k === '1') {
+                e.preventDefault();
+                sendPhoto('water');
+                return;
+            }
+            if (k === '2') {
+                e.preventDefault();
+                sendPhoto('electricity');
+                return;
+            }
+
+            if (keys.hasOwnProperty(k)) {
+                keys[k] = true;
+                e.preventDefault();
+            }
+        });
+        
+        document.addEventListener('keyup', (e) => {
+            const k = e.key.toLowerCase();
+            if (keys.hasOwnProperty(k)) {
+                keys[k] = false;
+            }
+        });
+
+        // Failsafe: หากสลับหน้าต่าง สั่งหยุดรถทันที
+        window.addEventListener('blur', () => {
+            for (let k in keys) keys[k] = false;
+            if (isMoving) {
+                sendCommand('/action?drive=0,0');
+                isMoving = false;
+            }
+        });
+
+        // --- Gamepad Events ---
+        window.addEventListener("gamepadconnected", function(e) {
+            document.getElementById("statusText").innerText = `🎮 พบจอยเกมเชื่อมต่อ: ${e.gamepad.id}`;
+        });
+        
+        window.addEventListener("gamepaddisconnected", function(e) {
+            document.getElementById("statusText").innerText = `จอยหลุดการเชื่อมต่อ...`;
+        });
+
+        // --- Main Control Loop (10 Hz) ---
+        setInterval(() => {
+            let y = 0; // เดินหน้า-ถอยหลัง
+            let z = 0; // เลี้ยวซ้าย-ขวา
+            let tilt = 0; // ก้ม-เงย (-1, 0, 1)
+            let pan = 0;  // แพนซ้าย-ขวา (-1, 0, 1)
+
+            // 1. อ่านค่าคีย์บอร์ด
+            if (keys.w) y = 255;
+            if (keys.s) y = -255;
+            if (keys.d) z = 255;
+            if (keys.a) z = -255;
+            
+            if (keys.arrowup) tilt = 1;
+            if (keys.arrowdown) tilt = -1;
+            if (keys.arrowleft) pan = -1;
+            if (keys.arrowright) pan = 1;
+
+            // 2. อ่านค่าจากจอยเกม USB
+            const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+            let gp = null;
+            for (let i = 0; i < gamepads.length; i++) {
+                if (gamepads[i] && gamepads[i].connected) {
+                    gp = gamepads[i];
+                    break;
+                }
+            }
+
+            if (gp) {
+                let stickY = -gp.axes[1];
+                let stickX = gp.axes[0]; 
+                
+                if (Math.abs(stickY) > 0.15) y = Math.round(stickY * 255);
+                if (Math.abs(stickX) > 0.15) z = Math.round(stickX * 255);
+                
+                // ก้านอนาล็อกขวาคุมมุมกล้อง 2-DOF
+                let rightX = gp.axes[2];
+                let rightY = gp.axes[3];
+                if (rightY < -0.3) tilt = 1;
+                else if (rightY > 0.3) tilt = -1;
+                if (rightX < -0.3) pan = -1;
+                else if (rightX > 0.3) pan = 1;
+                
+                if (gp.buttons[0] && gp.buttons[0].pressed) sendPhoto('water');
+                if (gp.buttons[2] && gp.buttons[2].pressed) sendPhoto('electricity');
+                if (gp.buttons[5] && gp.buttons[5].pressed) toggleBrush(); // R1
+            }
+
+            // ส่งคำสั่งขับเคลื่อน
+            if (y !== 0 || z !== 0) {
+                sendCommand(`/action?drive=${y},${z}`);
+                isMoving = true;
+            } else if (isMoving) {
+                sendCommand(`/action?drive=0,0`);
+                isMoving = false;
+            }
+            
+            // ส่งคำสั่งคุมมุมกล้อง Pan-Tilt
+            if (tilt !== 0) {
+                sendCommand(`/action?tilt=${tilt}`);
+            }
+            if (pan !== 0) {
+                sendCommand(`/action?pan=${pan}`);
+            }
+        }, 100);
+    </script>
+</body>
+</html>
