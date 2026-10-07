@@ -1,4 +1,4 @@
-#include <PS4Controller.h>
+#include <Bluepad32.h>
 
 // ==========================================
 // การกำหนดขาต่อใช้งาน (Pin Configurations) สำหรับชิป TB67H450
@@ -7,77 +7,125 @@ const int PIN_L_IN1 = 25;
 const int PIN_L_IN2 = 26;
 
 const int PIN_R_IN1 = 14;
-const int PIN_R_IN2 = 27; // เปลี่ยนจาก GPIO 12 เป็น 27 เพื่อเลี่ยงปัญหา Boot Strapping (MTDI Flash Voltage)
+const int PIN_R_IN2 = 12;
 
-// 3. ขาสำหรับคุมมอเตอร์แปรงปัดกวาด (Roller Brush)
-const int PIN_BRUSH_RELAY = 19; // ต่อผ่าน Relay หรือ MOSFET เพื่อเปิด-ปิดแปรงปัด
+const int PIN_BRUSH_RELAY = 19; // ต่อผ่าน Relay หรือ MOSFET เพื่อเปิด-ปิดแปรงปัด (Active LOW)
 
-// 4. ขาสำหรับต่อกับ Passive Buzzer แจ้งเตือนคนเดินผ่าน
-const int PIN_BUZZER = 18; // ใช้ขา GPIO 18 (รองรับ PWM)
-
-// 5. การตั้งค่า PWM Channel ของ ESP32 
-// (สำหรับ TB67H450 ต้องใช้ 4 ช่อง เพราะต้องสลับจ่าย PWM ใหักับ IN1 และ IN2 ของล้อซ้ายและขวา)
+// การตั้งค่า PWM Channel ของ ESP32 สำหรับมอเตอร์ล้อ
 const int freq = 5000;
 const int resolution = 8; // ความละเอียด 8 บิต (0-255)
+
 const int ch_L_IN1 = 0;
 const int ch_L_IN2 = 1;
 const int ch_R_IN1 = 2;
 const int ch_R_IN2 = 3;
-const int ch_BUZZER = 4; // แยก Channel 4 สำหรับ Buzzer ป้องกันเสียงกวนความถี่มอเตอร์
+
+// ==========================================
+// การตั้งค่าสำหรับ 2-DOF Pan-Tilt Servo (ควบคุมมุมกล้องด้วย LEDC 16-bit)
+// ==========================================
+// 1. แกน Tilt (ก้ม-เงย)
+const int PIN_SERVO_TILT = 13;
+const int ch_SERVO_TILT = 4;
+
+// 2. แกน Pan (กวาดซ้าย-ขวา) - ย้ายมาใช้ GPIO 21 แทน Stepper เดิม
+const int PIN_SERVO_PAN = 21;
+const int ch_SERVO_PAN = 5;
+
+const int freq_SERVO = 50;  // ความถี่มาตรฐานเซอร์โว 50Hz (คาบเวลา 20ms)
+const int res_SERVO = 16;   // ความละเอียด 16 บิต (0-65535)
+
+// ตัวแปรเก็บมุมปัจจุบัน (เริ่มต้นที่ 90 องศา - ตรงกลาง)
+int servoTiltAngle = 90;
+int servoPanAngle = 90;
+
+unsigned long lastServoUpdate = 0;
+const unsigned long SERVO_STEP_INTERVAL = 15; // อัปเดตมุมทุก 15ms เพื่อความนุ่มนวล
 
 // ==========================================
 // ตัวแปรควบคุมระบบ
 // ==========================================
-int roomNumber = 101; // เลขห้องเริ่มต้น
-bool brushState = false; // สถานะแปรงปัด (เปิด/ปิด)
+int roomNumber = 101; 
+bool brushState = false; 
 unsigned long lastButtonPress = 0;
-const int DEBOUNCE_TIME = 250; // หน่วงเวลากันกดปุ่มซ้ำ (มิลลิวินาที)
+const int DEBOUNCE_TIME = 250; 
+
+bool isPS4Moving = false;
+bool wasPS4Connected = false;
+
+// Serial Drive Watchdog (ป้องกันรถวิ่งเตลิดถ้า Pi 5 หลุดการสื่อสาร)
+unsigned long lastSerialDriveTime = 0;
+const unsigned long SERIAL_DRIVE_TIMEOUT = 500; // ms
+
+// ตัวแปรสำหรับ Bluepad32
+ControllerPtr myControllers[BP32_MAX_GAMEPADS];
 
 // ==========================================
-// ตัวแปรและฟังก์ชันสำหรับเสียงเมโลดี้เตือนแบบ Non-Blocking
+// ฟังก์ชันควบคุมมุม Servo (แปลงองศาเป็นสัญญาณ 16-bit Duty Cycle)
 // ==========================================
-// เมโลดี้เสียงเตือนเบาๆ (โน้ตเพลง Do-Mi-Sol-Do สูงขึ้นเรื่อยๆ แล้ววนลูป)
-int melody[] = { 262, 330, 392, 523, 392, 330 }; // C4, E4, G4, C5, G4, E4 arpeggio
-int noteDurations[] = { 150, 150, 150, 200, 150, 150 }; // ระยะเวลาเล่นโน้ตแต่ละตัว (มิลลิวินาที)
-int currentNote = 0;
-unsigned long previousNoteTime = 0;
-bool isBuzzerPlaying = false;
+void setServoTilt(int angle) {
+  servoTiltAngle = constrain(angle, 10, 170); // ล็อคช่วงมุมที่ปลอดภัยกันเซอร์โวติดขัด
+  // 50Hz คาบเวลาคือ 20ms (20000us) ที่ความละเอียด 16 บิต (65535)
+  // 0.5ms (0 องศา) = 1638 duty | 2.5ms (180 องศา) = 8192 duty
+  int duty = map(servoTiltAngle, 0, 180, 1638, 8192);
+  ledcWrite(ch_SERVO_TILT, duty);
+}
 
-void playMelodyNonBlocking() {
-  if (!brushState) {
-    if (isBuzzerPlaying) {
-      ledcWrite(ch_BUZZER, 0);
-      isBuzzerPlaying = false;
-    }
-    currentNote = 0; // รีเซ็ตกลับไปโน้ตตัวแรกสุด
-    return;
-  }
-  
-  unsigned long currentMillis = millis();
-  int noteDuration = noteDurations[currentNote];
-  int pauseBetweenNotes = noteDuration * 1.30; // หน่วงช่องว่างระหว่างโน้ต 30%
-  
-  if (!isBuzzerPlaying) {
-    ledcWriteTone(ch_BUZZER, melody[currentNote]);
-    previousNoteTime = currentMillis;
-    isBuzzerPlaying = true;
+void setServoPan(int angle) {
+  servoPanAngle = constrain(angle, 0, 180);
+  int duty = map(servoPanAngle, 0, 180, 1638, 8192);
+  ledcWrite(ch_SERVO_PAN, duty);
+}
+
+// ==========================================
+// ฟังก์ชันจัดตำแหน่งกล้องก้มเงยอัตโนมัติก่อนส่งคำสั่งถ่ายรูป
+// ==========================================
+void triggerPhoto(bool isWater) {
+  // นำรถหยุดสนิททันทีก่อนถ่ายภาพ เพื่อป้องกันภาพเบลอจากการเคลื่อนที่ (Edge Case 1.2 Motion Blur)
+  driveDifferential(0, 0);
+  isPS4Moving = false;
+
+  if (isWater) {
+    Serial.println("Auto Positioning Camera for WATER Meter...");
+    setServoTilt(45); // ปรับองศาก้มลงถ่ายมิเตอร์น้ำ
+    delay(400);       // รอเซอร์โวเคลื่อนที่เข้าตำแหน่ง
+    Serial.println("Triggering WATER Meter Photo via UART to Pi 5");
+    Serial2.print("WATER:" + String(roomNumber) + "\n");
   } else {
-    if (currentMillis - previousNoteTime >= noteDuration && currentMillis - previousNoteTime < pauseBetweenNotes) {
-      ledcWrite(ch_BUZZER, 0); // หยุดเสียงช่วงสั้นๆ ให้เกิดช่องไฟระหว่างตัวโน้ต
-    } else if (currentMillis - previousNoteTime >= pauseBetweenNotes) {
-      currentNote = (currentNote + 1) % (sizeof(melody) / sizeof(melody[0]));
-      ledcWriteTone(ch_BUZZER, melody[currentNote]);
-      previousNoteTime = currentMillis;
+    Serial.println("Auto Positioning Camera for ELECTRICITY Meter...");
+    setServoTilt(135); // ปรับองศาเงยขึ้นถ่ายมิเตอร์ไฟ
+    delay(400);        // รอเซอร์โวเคลื่อนที่เข้าตำแหน่ง
+    Serial.println("Triggering ELECTRICITY Meter Photo via UART to Pi 5");
+    Serial2.print("ELEC:" + String(roomNumber) + "\n");
+  }
+  delay(600);         // ให้เวลากล้อง Pi 5 ล็อคชัตเตอร์และรับแสงภาพอย่างสมบูรณ์
+  setServoTilt(servoTiltAngle); // หมุนกลับมาที่มุมแมนนวลเดิมของพลปืน
+}
+
+// ==========================================
+// Callback เมื่อจอยเชื่อมต่อ / ตัดการเชื่อมต่อ
+// ==========================================
+void onConnectedController(ControllerPtr ctl) {
+  for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+    if (myControllers[i] == nullptr) {
+      Serial.printf("🎮 Controller [%d] Connected!\n", i + 1);
+      myControllers[i] = ctl;
+      break;
     }
   }
 }
 
-// ตัวแปรสำหรับเช็กว่า PS4 กำลังบังคับมอเตอร์อยู่หรือไม่ (เพื่อสลับสิทธิ์ให้ Web UI ทำงานได้)
-bool isPS4Moving = false;
-bool wasPS4Connected = false;
+void onDisconnectedController(ControllerPtr ctl) {
+  for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+    if (myControllers[i] == ctl) {
+      Serial.printf("🔌 Controller [%d] Disconnected\n", i + 1);
+      myControllers[i] = nullptr;
+      break;
+    }
+  }
+}
 
 // ==========================================
-// ฟังก์ชันกำหนดทิศทางและความเร็วมอเตอร์ (สำหรับ TB67H450 โดยเฉพาะ)
+// ฟังก์ชันกำหนดทิศทางและความเร็วมอเตอร์ล้อขับเคลื่อน
 // ==========================================
 void setMotorTB67(int ch_in1, int ch_in2, int speed) {
   speed = constrain(speed, -255, 255);
@@ -93,9 +141,6 @@ void setMotorTB67(int ch_in1, int ch_in2, int speed) {
   }
 }
 
-// ==========================================
-// ฟังก์ชันคำนวณทิศทางการเคลื่อนที่ล้อ Differential Drive (2 ล้อ)
-// ==========================================
 void driveDifferential(int y, int z) {
   int speed_L = y + z;
   int speed_R = y - z;
@@ -103,20 +148,25 @@ void driveDifferential(int y, int z) {
   setMotorTB67(ch_R_IN1, ch_R_IN2, speed_R);
 }
 
+void printRoomStatus() {
+  Serial.printf(">>> 🚪 Selected Room: %d (Floor %d, Room %02d) <<<\n", roomNumber, roomNumber / 100, roomNumber % 100);
+}
+
+// ==========================================
+// Setup
+// ==========================================
 void setup() {
   Serial.begin(115200);
-  
-  // เริ่มต้น Serial2 สำหรับคุยกับ ESP32-CAM (Rx2 = Pin 16, Tx2 = Pin 17)
+  // พอร์ตสื่อสาร Serial2 สำหรับคุยกับ Raspberry Pi 5 (RX2=GPIO 16, TX2=GPIO 17)
   Serial2.begin(115200, SERIAL_8N1, 16, 17);
+  Serial2.setTimeout(10); // ป้องกันบอร์ดค้างเวลามีสัญญาณรบกวน
   
-  pinMode(PIN_BRUSH_RELAY, OUTPUT);
-  digitalWrite(PIN_BRUSH_RELAY, LOW);
-  
-  // ตั้งค่า PWM สำหรับ Buzzer ผ่าน LEDC Channel 4 แยกอิสระ ไม่กวนความถี่มอเตอร์
-  ledcSetup(ch_BUZZER, 2000, 8);
-  ledcAttachPin(PIN_BUZZER, ch_BUZZER);
-  ledcWrite(ch_BUZZER, 0);
+  pinMode(16, INPUT_PULLUP); // ป้องกัน Floating Pin ตอนยังไม่ต่อสาย
 
+  pinMode(PIN_BRUSH_RELAY, OUTPUT);
+  digitalWrite(PIN_BRUSH_RELAY, HIGH); // Active LOW: เริ่มต้นจ่าย HIGH เพื่อ "ปิด" แปรงปัด
+
+  // ตั้งค่า PWM สำหรับมอเตอร์ล้อขับเคลื่อน
   ledcSetup(ch_L_IN1, freq, resolution);
   ledcAttachPin(PIN_L_IN1, ch_L_IN1);
   ledcSetup(ch_L_IN2, freq, resolution);
@@ -126,119 +176,219 @@ void setup() {
   ledcSetup(ch_R_IN2, freq, resolution);
   ledcAttachPin(PIN_R_IN2, ch_R_IN2);
 
-  PS4.begin("e8:9e:b4:0b:35:10"); 
-  Serial.println("ESP32 Main Drive Ready (Redundant Mode). Waiting for PS4 or Web UI commands...");
+  // ตั้งค่า PWM สำหรับ 2-DOF Pan-Tilt Servo
+  ledcSetup(ch_SERVO_TILT, freq_SERVO, res_SERVO);
+  ledcAttachPin(PIN_SERVO_TILT, ch_SERVO_TILT);
+  setServoTilt(servoTiltAngle); // มุมเริ่มต้นก้มเงย 90 องศา (ระนาบตรง)
+
+  ledcSetup(ch_SERVO_PAN, freq_SERVO, res_SERVO);
+  ledcAttachPin(PIN_SERVO_PAN, ch_SERVO_PAN);
+  setServoPan(servoPanAngle);   // มุมเริ่มต้นหันซ้ายขวา 90 องศา (หันตรง)
+
+  // เริ่มต้นระบบ Bluepad32
+  BP32.setup(&onConnectedController, &onDisconnectedController);
+
+  Serial.println("=================================================");
+  Serial.println("🤖 ESP32 Main Drive Ready (2-DOF Pan-Tilt + Pi 5 UART)");
+  Serial.println("🎮 Left Stick: Drive & Steer | Right Stick: 2-DOF Camera");
+  Serial.println("=================================================");
+  printRoomStatus();
 }
 
+// ==========================================
+// Main Loop
+// ==========================================
 void loop() {
-  // 1. ตรวจสอบจอย PS4 (ฝั่งพลขับ)
-  if (PS4.isConnected()) {
+  BP32.update();
+
+  ControllerPtr driverGamepad = myControllers[0];
+  
+  if (driverGamepad && driverGamepad->isConnected()) {
     wasPS4Connected = true;
     
-    int translation = PS4.LStickY() * 2; 
-    int rotation = PS4.RStickX() * 2;    
+    // ----------------------------------------------------
+    // 1. บังคับล้อรถ (ก้านอนาล็อกซ้าย: Y=เดินหน้า/ถอยหลัง, X=เลี้ยวซ้าย/ขวา)
+    // ----------------------------------------------------
+    int translation = -(driverGamepad->axisY()) / 2; 
+    int rotation = (driverGamepad->axisX()) / 2;    
     
     if (abs(translation) < 20) translation = 0;
     if (abs(rotation) < 20) rotation = 0;
     
-    // ระบบแบ่งปันการขับ (Redundant Control)
-    // ถ้าจอย PS4 ถูกดัน จะส่งคำสั่งไปที่มอเตอร์ทันที
     if (translation != 0 || rotation != 0) {
       driveDifferential(translation, rotation);
       isPS4Moving = true;
     } 
-    // ถ้าจอย PS4 ถูกปล่อยกลับมาตรงกลาง จะสั่งหยุดมอเตอร์แค่ 1 ครั้ง และคืนสิทธิ์ให้ Web UI
     else if (isPS4Moving) {
       driveDifferential(0, 0);
       isPS4Moving = false;
     }
     
+    // ----------------------------------------------------
+    // 2. ควบคุมปุ่มกด (แปรงปัด, ห้อง, ถ่ายภาพ)
+    // ----------------------------------------------------
     if (millis() - lastButtonPress > DEBOUNCE_TIME) {
-      if (PS4.R1()) {
+      // ปุ่ม R1: เปิด-ปิดแปรงปัด (Active LOW Relay)
+      if (driverGamepad->r1()) {
         brushState = !brushState;
-        digitalWrite(PIN_BRUSH_RELAY, brushState ? HIGH : LOW);
-        Serial.println(brushState ? "Roller Brush: ON" : "Roller Brush: OFF");
+        digitalWrite(PIN_BRUSH_RELAY, brushState ? LOW : HIGH);
+        Serial.println(brushState ? "🧹 Roller Brush: ON" : "🧹 Roller Brush: OFF");
         lastButtonPress = millis();
       }
-      
-      if (PS4.Up()) { roomNumber++; printRoomStatus(); lastButtonPress = millis(); }
-      if (PS4.Down()) { if (roomNumber > 1) roomNumber--; printRoomStatus(); lastButtonPress = millis(); }
-      if (PS4.Right()) { roomNumber += 10; printRoomStatus(); lastButtonPress = millis(); }
-      if (PS4.Left()) { if (roomNumber > 10) roomNumber -= 10; printRoomStatus(); lastButtonPress = millis(); }
-      
-      if (PS4.Square()) {
-        Serial.println("Trigger (PS4): WATER Meter Photo");
-        Serial2.print("WATER:" + String(roomNumber) + "\n");
-        lastButtonPress = millis();
+
+      // ปุ่ม D-Pad: เปลี่ยนห้องพัก 5 ชั้น 50 ห้อง (101-510)
+      uint16_t dpad = driverGamepad->dpad();
+      if (dpad != 0) {
+        int floor = roomNumber / 100;
+        int roomInFloor = roomNumber % 100;
+        bool roomChanged = false;
+
+        // UP: ห้องถัดไป (101 -> 102 ... 110 -> 201)
+        if (dpad & 0x01) { 
+          roomInFloor++;
+          if (roomInFloor > 10) {
+            roomInFloor = 1;
+            floor = (floor >= 5) ? 1 : floor + 1;
+          }
+          roomChanged = true;
+        }
+        // DOWN: ห้องก่อนหน้า (201 -> 110 ... 102 -> 101)
+        else if (dpad & 0x02) { 
+          roomInFloor--;
+          if (roomInFloor < 1) {
+            roomInFloor = 10;
+            floor = (floor <= 1) ? 5 : floor - 1;
+          }
+          roomChanged = true;
+        }
+        // RIGHT: กระโดดขึ้นชั้นถัดไปทันที (เช่น 102 -> 202)
+        else if (dpad & 0x04) { 
+          floor = (floor >= 5) ? 1 : floor + 1;
+          roomChanged = true;
+        }
+        // LEFT: กระโดดลงชั้นก่อนหน้าทันที (เช่น 302 -> 202)
+        else if (dpad & 0x08) { 
+          floor = (floor <= 1) ? 5 : floor - 1;
+          roomChanged = true;
+        }
+
+        if (roomChanged) {
+          roomNumber = floor * 100 + roomInFloor;
+          printRoomStatus();
+          lastButtonPress = millis();
+        }
       }
-      if (PS4.Triangle()) {
-        Serial.println("Trigger (PS4): ELECTRICITY Meter Photo");
-        Serial2.print("ELEC:" + String(roomNumber) + "\n");
-        lastButtonPress = millis();
+
+      // ปุ่ม X (Square): ถ่ายภาพมิเตอร์น้ำ | ปุ่ม Y (Triangle/Cross): ถ่ายภาพมิเตอร์ไฟ
+      if (driverGamepad->x()) { triggerPhoto(true); lastButtonPress = millis(); }
+      if (driverGamepad->y()) { triggerPhoto(false); lastButtonPress = millis(); }
+    }
+
+    // ----------------------------------------------------
+    // 3. ควบคุมมุมกล้อง 2-DOF Pan-Tilt (ก้านอนาล็อกขวา: RX=หันซ้ายขวา, RY=ก้มเงย)
+    // ----------------------------------------------------
+    int panStick = driverGamepad->axisRX(); 
+    int tiltStick = driverGamepad->axisRY(); 
+
+    if (abs(panStick) > 50 || abs(tiltStick) > 50) {
+      unsigned long currentMillis = millis();
+      if (currentMillis - lastServoUpdate >= SERVO_STEP_INTERVAL) { 
+        // กวาดซ้าย-ขวา (Pan)
+        if (panStick > 50) servoPanAngle = constrain(servoPanAngle + 1, 0, 180);
+        else if (panStick < -50) servoPanAngle = constrain(servoPanAngle - 1, 0, 180);
+        setServoPan(servoPanAngle);
+
+        // ก้ม-เงย (Tilt)
+        if (tiltStick < -50) servoTiltAngle = constrain(servoTiltAngle + 1, 10, 170); // ก้ม
+        else if (tiltStick > 50) servoTiltAngle = constrain(servoTiltAngle - 1, 10, 170); // เงย
+        setServoTilt(servoTiltAngle);
+
+        lastServoUpdate = currentMillis;
       }
     }
+
   } else {
-    // ถ้าจอย PS4 หลุด ให้หยุดรถแค่ 1 ครั้งเพื่อความปลอดภัย แล้วเปิดทางให้ Web UI ทำงานต่อ
+    // Failsafe: จอยหลุดการเชื่อมต่อ ให้หยุดรถและปิดแปรงปัดทันที
     if (wasPS4Connected) {
       driveDifferential(0, 0);
-      digitalWrite(PIN_BRUSH_RELAY, LOW);
+      digitalWrite(PIN_BRUSH_RELAY, HIGH); // ปิดแปรงปัด
+      brushState = false;                  // ซิงค์สถานะตัวแปรให้ตรงกับฮาร์ดแวร์
       wasPS4Connected = false;
       isPS4Moving = false;
     }
   }
-  
-  // 2. ตรวจสอบคำสั่งจาก ESP32-CAM (ฝั่งพลปืน / Web UI แบบ Non-blocking ไม่บล็อกลูป)
-  static char rxBuf[64];
-  static uint8_t rxIdx = 0;
-  
-  while (Serial2.available() > 0) {
-    char c = Serial2.read();
-    if (c == '\n') {
-      rxBuf[rxIdx] = '\0';
-      String camResponse = String(rxBuf);
-      camResponse.trim();
-      rxIdx = 0;
-      
-      // คำสั่งขับเคลื่อนจาก Web UI (DRIVE:y,z)
-      if (camResponse.startsWith("DRIVE:")) {
-        String payload = camResponse.substring(6);
-        int commaIdx = payload.indexOf(',');
-        if (commaIdx != -1) {
-          int y = payload.substring(0, commaIdx).toInt();
-          int z = payload.substring(commaIdx + 1).toInt();
-          // ยอมให้ Web UI สั่งขับรถได้ ก็ต่อเมื่อจอย PS4 ไม่ได้ขยับอยู่เท่านั้น
-          if (!isPS4Moving) {
-            driveDifferential(y, z);
-          }
+
+  // ----------------------------------------------------
+  // 4. ตรวจสอบคำสั่งจาก Raspberry Pi 5 / Web UI ผ่าน UART (Serial2)
+  // ----------------------------------------------------
+  if (Serial2.available() > 0) {
+    String piResponse = Serial2.readStringUntil('\n');
+    piResponse.trim();
+    
+    if (piResponse.startsWith("DRIVE:")) {
+      String payload = piResponse.substring(6);
+      int commaIdx = payload.indexOf(',');
+      if (commaIdx != -1) {
+        int y = payload.substring(0, commaIdx).toInt();
+        int z = payload.substring(commaIdx + 1).toInt();
+        if (!isPS4Moving) {
+          driveDifferential(y, z);
+          lastSerialDriveTime = millis(); // บันทึกเวลารับคำสั่งล่าสุดสำหรับ Watchdog
         }
-      } 
-      // คำสั่งเปิดปิดแปรงจาก Web UI (BRUSH:0 หรือ BRUSH:1)
-      else if (camResponse.startsWith("BRUSH:")) {
-        String payload = camResponse.substring(6);
-        brushState = (payload.toInt() == 1);
-        digitalWrite(PIN_BRUSH_RELAY, brushState ? HIGH : LOW);
-        Serial.println(brushState ? "Roller Brush (via Web UI): ON" : "Roller Brush (via Web UI): OFF");
       }
-      // ข้อความแจ้งสถานะอื่นๆ จากกล้อง
-      else if (camResponse.length() > 0) {
-        Serial.println("[ESP32-CAM]: " + camResponse);
+    } 
+    else if (piResponse.startsWith("BRUSH:")) {
+      String payload = piResponse.substring(6);
+      brushState = (payload.toInt() == 1);
+      digitalWrite(PIN_BRUSH_RELAY, brushState ? LOW : HIGH);
+      Serial.println(brushState ? "🧹 Roller Brush (via Web): ON" : "🧹 Roller Brush (via Web): OFF");
+    }
+    else if (piResponse.startsWith("TILT:")) {
+      int dir = piResponse.substring(5).toInt();
+      servoTiltAngle = constrain(servoTiltAngle + (dir * 5), 10, 170);
+      setServoTilt(servoTiltAngle);
+      Serial.println("📐 Servo Tilt (via Web): " + String(servoTiltAngle) + " deg");
+    }
+    else if (piResponse.startsWith("PAN:")) {
+      int dir = piResponse.substring(4).toInt();
+      servoPanAngle = constrain(servoPanAngle + (dir * 5), 0, 180);
+      setServoPan(servoPanAngle);
+      Serial.println("📐 Servo Pan (via Web): " + String(servoPanAngle) + " deg");
+    }
+    else if (piResponse.startsWith("ROOM_SET_FROM_WEB:")) {
+      roomNumber = piResponse.substring(18).toInt();
+      Serial.printf(">>> 🚪 Room Synced from Web: %d <<<\n", roomNumber);
+    }
+    else if (piResponse.startsWith("AUTOPOS:")) {
+      String pos = piResponse.substring(8);
+      if (pos == "WATER") {
+        Serial.println("Auto Positioning Camera for WATER Meter (Web Command)...");
+        setServoTilt(45);
+      } else if (pos == "ELEC") {
+        Serial.println("Auto Positioning Camera for ELECTRICITY Meter (Web Command)...");
+        setServoTilt(135);
+      } else if (pos == "RESET") {
+        Serial.println("Resetting Camera Angle back to operator setting");
+        setServoTilt(servoTiltAngle);
+        setServoPan(servoPanAngle);
       }
-    } else if (c != '\r') {
-      if (rxIdx < sizeof(rxBuf) - 1) {
-        rxBuf[rxIdx++] = c;
+    }
+    else {
+      if (piResponse.length() > 0) {
+        Serial.println("[Pi 5 Response]: " + piResponse);
       }
     }
   }
-  
-  // เล่นเมโลดี้เตือนเมื่อระบบกำลังทำงานปัดกวาด (Non-blocking)
-  playMelodyNonBlocking();
-  
-  delay(10);
-}
 
-void printRoomStatus() {
-  Serial.print("Current Room selected: ");
-  Serial.println(roomNumber);
-  // ซิงค์เลขห้องไปยังบอร์ด ESP32-CAM เพื่อให้อัปเดตหน้าจอ HUD / Web UI ทันที
-  Serial2.print("ROOM:" + String(roomNumber) + "\n");
+  // ----------------------------------------------------
+  // 5. Watchdog ป้องกันรถวิ่งเตลิด (Serial Drive Watchdog)
+  // ----------------------------------------------------
+  // หากกำลังขับด้วยคำสั่งจาก Web/Pi 5 (จอยไม่ได้แตะ) แต่ไม่ได้รับคำสั่ง DRIVE มาเกิน 500ms ให้หยุดรถทันที
+  if (!isPS4Moving && lastSerialDriveTime > 0 && (millis() - lastSerialDriveTime > SERIAL_DRIVE_TIMEOUT)) {
+    driveDifferential(0, 0);
+    lastSerialDriveTime = 0;
+    Serial.println("⚠️ [Watchdog]: Serial Drive Timeout! Motors Stopped for Safety.");
+  }
+  
+  delay(1); // ลดภาระ CPU และ Yield ให้กับ FreeRTOS Background Tasks
 }
