@@ -297,6 +297,12 @@ esp_err_t action_handler(httpd_req_t *req) {
                 if (httpd_query_key_value(buf, "type", type, sizeof(type)) == ESP_OK &&
                     httpd_query_key_value(buf, "room", room, sizeof(room)) == ESP_OK) {
                     
+                    static unsigned long lastWebPhotoTrigger = 0;
+                    if (millis() - lastWebPhotoTrigger < 4000 || isUploading || takePhotoTriggered) {
+                        return httpd_resp_send(req, "BUSY", 4);
+                    }
+                    lastWebPhotoTrigger = millis();
+
                     targetMeterType = String(type);
                     currentRoomNumber = String(room);
                     takePhotoTriggered = true; // ตั้งธงให้ loop() ดึงไปถ่ายรูป
@@ -491,14 +497,26 @@ void loop() {
         Serial.println("[Sync] Room updated: " + currentRoomNumber);
       }
       else if (command.startsWith("WATER:")) {
-        currentRoomNumber = command.substring(6);
-        targetMeterType = "WATER";
-        takePhotoTriggered = true;
+        static unsigned long lastWaterTrigger = 0;
+        if (millis() - lastWaterTrigger > 4000 && !isUploading && !takePhotoTriggered) {
+          currentRoomNumber = command.substring(6);
+          targetMeterType = "WATER";
+          takePhotoTriggered = true;
+          lastWaterTrigger = millis();
+        } else {
+          Serial.println("⏳ [Failsafe]: Duplicate WATER trigger ignored (Busy/Cooldown)");
+        }
       } 
       else if (command.startsWith("ELEC:")) {
-        currentRoomNumber = command.substring(5);
-        targetMeterType = "ELEC";
-        takePhotoTriggered = true;
+        static unsigned long lastElecTrigger = 0;
+        if (millis() - lastElecTrigger > 4000 && !isUploading && !takePhotoTriggered) {
+          currentRoomNumber = command.substring(5);
+          targetMeterType = "ELEC";
+          takePhotoTriggered = true;
+          lastElecTrigger = millis();
+        } else {
+          Serial.println("⏳ [Failsafe]: Duplicate ELEC trigger ignored (Busy/Cooldown)");
+        }
       }
     } else if (c != '\r') {
       if (camRxIdx < sizeof(camRxBuf) - 1) {
@@ -513,6 +531,13 @@ void loop() {
     delay(500); // รอให้ระบบ Stream สไลด์เข้าสู่สถานะหลับ (Paused) เพื่อป้องกัน RAM ชนกัน
     
     takeAndSendPhoto(targetMeterType, currentRoomNumber);
+    
+    // ล้างคำสั่งที่คั่งค้างในบัฟเฟอร์ Serial UART ทิ้งทั้งหมดทันที
+    // เพื่อป้องกันกรณีคำสั่งถูกส่งเข้ามาอั้นสะสมขณะกำลังอัปโหลด แล้วทำให้ถ่ายซ้ำเป็นปาปารัสซี่
+    while (Serial.available() > 0) {
+      Serial.read();
+    }
+    camRxIdx = 0; // ล้างตำแหน่งบัฟเฟอร์ตัวรับ
     
     takePhotoTriggered = false;
     isUploading = false;

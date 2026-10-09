@@ -7,7 +7,7 @@ const int PIN_L_IN1 = 25;
 const int PIN_L_IN2 = 26;
 
 const int PIN_R_IN1 = 14;
-const int PIN_R_IN2 = 12;
+const int PIN_R_IN2 = 27; // ย้ายจาก GPIO 12 มาเป็น 27 เพื่อแก้ปัญหาล้อขวาไม่หมุน และไม่ต้องถอดสายตอนแฟลชโค้ด
 
 const int PIN_BRUSH_RELAY = 19; // ต่อผ่าน Relay หรือ MOSFET เพื่อเปิด-ปิดแปรงปัด (Active LOW)
 
@@ -207,13 +207,13 @@ void loop() {
     wasPS4Connected = true;
     
     // ----------------------------------------------------
-    // 1. บังคับล้อรถ (ก้านอนาล็อกซ้าย: Y=เดินหน้า/ถอยหลัง, X=เลี้ยวซ้าย/ขวา)
+    // 1. บังคับล้อรถ (ก้านซ้ายคุมรถ 100%: Y=เดินหน้า/ถอยหลัง, X=เลี้ยวซ้าย/ขวา)
     // ----------------------------------------------------
-    int translation = -(driverGamepad->axisY()) / 2; 
-    int rotation = (driverGamepad->axisX()) / 2;    
+    int translation = -(driverGamepad->axisY()) / 2; // ก้านซ้าย Y: เดินหน้า / ถอยหลัง
+    int rotation = (driverGamepad->axisX()) / 2;    // ก้านซ้าย X: เลี้ยวซ้าย / เลี้ยวขวา
     
-    if (abs(translation) < 20) translation = 0;
-    if (abs(rotation) < 20) rotation = 0;
+    if (abs(translation) < 25) translation = 0;
+    if (abs(rotation) < 25) rotation = 0;
     
     if (translation != 0 || rotation != 0) {
       driveDifferential(translation, rotation);
@@ -225,26 +225,36 @@ void loop() {
     }
     
     // ----------------------------------------------------
-    // 2. ควบคุมปุ่มกด (แปรงปัด, ห้อง, ถ่ายภาพ)
+    // 2. ควบคุมปุ่มกด (แปรงปัด, ห้อง, ถ่ายภาพ) พร้อมระบบ Edge Detection ป้องกันกดย้ำ/กดค้าง
     // ----------------------------------------------------
+    static bool lastBtnR1 = false;
+    static bool lastBtnX = false;
+    static bool lastBtnY = false;
+    static uint16_t lastDpad = 0;
+    static unsigned long lastPhotoTriggerTime = 0;
+
+    bool currentBtnR1 = driverGamepad->r1();
+    bool currentBtnX = driverGamepad->x();
+    bool currentBtnY = driverGamepad->y();
+    uint16_t currentDpad = driverGamepad->dpad();
+
     if (millis() - lastButtonPress > DEBOUNCE_TIME) {
-      // ปุ่ม R1: เปิด-ปิดแปรงปัด (Active LOW Relay)
-      if (driverGamepad->r1()) {
+      // ปุ่ม R1: เปิด-ปิดแปรงปัด (Active LOW Relay) - ดักเฉพาะจังหวะเพิ่งกดลง (Rising Edge)
+      if (currentBtnR1 && !lastBtnR1) {
         brushState = !brushState;
         digitalWrite(PIN_BRUSH_RELAY, brushState ? LOW : HIGH);
         Serial.println(brushState ? "🧹 Roller Brush: ON" : "🧹 Roller Brush: OFF");
         lastButtonPress = millis();
       }
 
-      // ปุ่ม D-Pad: เปลี่ยนห้องพัก 5 ชั้น 50 ห้อง (101-510)
-      uint16_t dpad = driverGamepad->dpad();
-      if (dpad != 0) {
+      // ปุ่ม D-Pad: เปลี่ยนห้องพัก 5 ชั้น 50 ห้อง (101-510) - ดักเฉพาะจังหวะเพิ่งกดลง
+      if (currentDpad != 0 && lastDpad == 0) {
         int floor = roomNumber / 100;
         int roomInFloor = roomNumber % 100;
         bool roomChanged = false;
 
         // UP: ห้องถัดไป (101 -> 102 ... 110 -> 201)
-        if (dpad & 0x01) { 
+        if (currentDpad & 0x01) { 
           roomInFloor++;
           if (roomInFloor > 10) {
             roomInFloor = 1;
@@ -253,7 +263,7 @@ void loop() {
           roomChanged = true;
         }
         // DOWN: ห้องก่อนหน้า (201 -> 110 ... 102 -> 101)
-        else if (dpad & 0x02) { 
+        else if (currentDpad & 0x02) { 
           roomInFloor--;
           if (roomInFloor < 1) {
             roomInFloor = 10;
@@ -262,12 +272,12 @@ void loop() {
           roomChanged = true;
         }
         // RIGHT: กระโดดขึ้นชั้นถัดไปทันที (เช่น 102 -> 202)
-        else if (dpad & 0x04) { 
+        else if (currentDpad & 0x04) { 
           floor = (floor >= 5) ? 1 : floor + 1;
           roomChanged = true;
         }
         // LEFT: กระโดดลงชั้นก่อนหน้าทันที (เช่น 302 -> 202)
-        else if (dpad & 0x08) { 
+        else if (currentDpad & 0x08) { 
           floor = (floor <= 1) ? 5 : floor - 1;
           roomChanged = true;
         }
@@ -280,27 +290,45 @@ void loop() {
       }
 
       // ปุ่ม X (Square): ถ่ายภาพมิเตอร์น้ำ | ปุ่ม Y (Triangle/Cross): ถ่ายภาพมิเตอร์ไฟ
-      if (driverGamepad->x()) { triggerPhoto(true); lastButtonPress = millis(); }
-      if (driverGamepad->y()) { triggerPhoto(false); lastButtonPress = millis(); }
+      // ป้องกันถ่ายรัว: ดักจับเฉพาะ Rising Edge (ปล่อยแล้วกดใหม่เท่านั้น) + Cooldown 4 วินาที
+      if ((currentBtnX && !lastBtnX) || (currentBtnY && !lastBtnY)) {
+        if (millis() - lastPhotoTriggerTime > 4000) {
+          if (currentBtnX && !lastBtnX) {
+            triggerPhoto(true);
+          } else {
+            triggerPhoto(false);
+          }
+          lastPhotoTriggerTime = millis();
+          lastButtonPress = millis();
+        } else {
+          Serial.println("⏳ [Failsafe]: Photo trigger ignored (Cooldown in progress)");
+        }
+      }
     }
 
-    // ----------------------------------------------------
-    // 3. ควบคุมมุมกล้อง 2-DOF Pan-Tilt (ก้านอนาล็อกขวา: RX=หันซ้ายขวา, RY=ก้มเงย)
-    // ----------------------------------------------------
-    int panStick = driverGamepad->axisRX(); 
-    int tiltStick = driverGamepad->axisRY(); 
+    // อัปเดตสถานะปุ่มรอบล่าสุดสำหรับ Edge Detection
+    lastBtnR1 = currentBtnR1;
+    lastBtnX = currentBtnX;
+    lastBtnY = currentBtnY;
+    lastDpad = currentDpad;
 
-    if (abs(panStick) > 50 || abs(tiltStick) > 50) {
+    // ----------------------------------------------------
+    // 3. ควบคุมมุมกล้อง 2-DOF Pan-Tilt (ก้านขวาคุมกล้อง 100%: RX=หันซ้ายขวา, RY=ก้มเงย)
+    // ----------------------------------------------------
+    int panStick = driverGamepad->axisRX();  // ก้านขวา X: หันซ้าย-ขวา
+    int tiltStick = driverGamepad->axisRY(); // ก้านขวา Y: ก้ม-เงย
+
+    if (abs(panStick) > 80 || abs(tiltStick) > 80) { // Deadzone 80 ป้องกันอนาล็อกดริฟต์/สั่นเอง
       unsigned long currentMillis = millis();
       if (currentMillis - lastServoUpdate >= SERVO_STEP_INTERVAL) { 
         // กวาดซ้าย-ขวา (Pan)
-        if (panStick > 50) servoPanAngle = constrain(servoPanAngle + 1, 0, 180);
-        else if (panStick < -50) servoPanAngle = constrain(servoPanAngle - 1, 0, 180);
+        if (panStick > 80) servoPanAngle = constrain(servoPanAngle + 1, 0, 180);
+        else if (panStick < -80) servoPanAngle = constrain(servoPanAngle - 1, 0, 180);
         setServoPan(servoPanAngle);
 
         // ก้ม-เงย (Tilt)
-        if (tiltStick < -50) servoTiltAngle = constrain(servoTiltAngle + 1, 10, 170); // ก้ม
-        else if (tiltStick > 50) servoTiltAngle = constrain(servoTiltAngle - 1, 10, 170); // เงย
+        if (tiltStick < -80) servoTiltAngle = constrain(servoTiltAngle + 1, 10, 170); // ดันขึ้น=เงย
+        else if (tiltStick > 80) servoTiltAngle = constrain(servoTiltAngle - 1, 10, 170); // ดันลง=ก้ม
         setServoTilt(servoTiltAngle);
 
         lastServoUpdate = currentMillis;
